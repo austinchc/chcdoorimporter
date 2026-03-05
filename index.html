@@ -198,7 +198,7 @@ Return ONLY valid JSON (no markdown, no extra whitespace — keep it compact to 
   ]
 }`;
 
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetch("https://solitary-disk-4751.austin-childers.workers.dev", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
