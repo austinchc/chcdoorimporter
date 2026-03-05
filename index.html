@@ -153,7 +153,7 @@ const fileToBase64 = file => new Promise((res, rej) => {
 
 // ── Claude API ────────────────────────────────────────────────────────────────
 async function callClaude(base64PDF, promptText) {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetch("https://solitary-disk-4751.austin-childers.workers.dev", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
