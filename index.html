@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CHC Schedule Importer</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', 'Segoe UI', sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #a0c8a0; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+var useState = React.useState, useRef = React.useRef;
+var TICKS = String.fromCharCode(96,96,96);
+var WORKER = "https://solitary-disk-4751.austin-childers.workers.dev/";
+
+function f2b64(file){return new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result.split(",")[1]);};r.onerror=rej;r.readAsDataURL(file);});}
+function dlBlob(c,fn,m){var b=new Blob([c],{type:m});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download=fn;document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1e3);}
+var XL=null;
+function loadXL(){return new Promise(function(ok,no){if(XL)return ok(XL);if(window.XLSX){XL=window.XLSX;return ok(XL);}var s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";s.onload=function(){XL=window.XLSX;ok(XL);};s.onerror=no;document.head.appendChild(s);});}
+async function dlXLSX(rows,hdrs,fn){var x=await loadXL();var d=[hdrs].concat(rows.map(function(r){return hdrs.map(function(h){return r[h]||"";})}));var ws=x.utils.aoa_to_sheet(d);var wb=x.utils.book_new();x.utils.book_append_sheet(wb,ws,"IMPORT");x.writeFile(wb,fn);}
+function mkCSV(rows,hdrs){var e=function(v){return '"'+String(v||"").replace(/"/g,'""')+'"';};var l=[hdrs.map(e).join(",")];rows.forEach(function(r){l.push(hdrs.map(function(h){return e(r[h]);}).join(","));});return l.join("\n");}
+
+function cleanJ(raw){var re=new RegExp("^"+TICKS+"json|^"+TICKS+"|"+TICKS+"$","gm");return raw.replace(re,"").trim();}
+async function callAI(b64,prompt,prog,model){
+  var mdl=model||"claude-sonnet-4-20250514";
+  var maxRetries=2;
+  for(var attempt=0;attempt<=maxRetries;attempt++){
+    prog(attempt>0?"Retrying (rate limit)… attempt "+(attempt+1):"Extracting with AI…");
+    var r=await fetch(WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mdl,max_tokens:16000,messages:[{role:"user",content:[{type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},{type:"text",text:prompt}]}]})});
+    var d=await r.json();
+    if(d.error){
+      var msg=d.error.message||"";
+      if(msg.indexOf("rate limit")!==-1 && attempt<maxRetries){
+        prog("Rate limited — waiting 15s…");
+        await new Promise(function(ok){setTimeout(ok,15000);});
+        continue;
+      }
+      throw new Error(msg);
+    }
+    var raw=d.content.map(function(b){return b.text||"";}).join("").trim();
+    var c=cleanJ(raw);
+    try{return JSON.parse(c);}catch(e){var i=c.lastIndexOf("},");if(i===-1)throw new Error("Could not parse response.");try{var p2=JSON.parse(c.slice(0,i+1)+"]}");p2._truncated=true;return p2;}catch(e2){throw new Error("Response too large.");}}
+  }
+  throw new Error("Rate limit exceeded after retries. Please wait a minute and try again.");
+}
+
+/* ═══ STYLES ═══ */
+var S={
+  app:{minHeight:"100vh",background:"#f5f7f5",color:"#1e2e1e",fontFamily:"'Inter','Segoe UI',sans-serif",paddingBottom:60},
+  hdr:{background:"linear-gradient(135deg,#2d7a2d,#1e5c1e)",borderBottom:"2px solid #1a5c1a",padding:"16px 32px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"},
+  main:{maxWidth:1340,margin:"0 auto",padding:"24px 20px"},
+  card:{background:"#fff",border:"1px solid #c8e0c8",borderRadius:10,padding:24,marginBottom:20,boxShadow:"0 1px 4px #00000010"},
+  lbl:{fontSize:10,letterSpacing:3,textTransform:"uppercase",color:"#2d7a2d",marginBottom:12,fontWeight:700,display:"block"},
+  th:{background:"#e8f5e8",padding:"8px 10px",fontSize:10,letterSpacing:.5,textTransform:"uppercase",color:"#1e5c1e",whiteSpace:"nowrap",borderBottom:"1px solid #c8e0c8",borderRight:"1px solid #c8e0c822",textAlign:"left",position:"sticky",top:0,zIndex:2},
+  thSub:{fontSize:9,color:"#5a9e5a",fontWeight:400,letterSpacing:0,textTransform:"none"},
+  inp:{background:"#f5f7f5",border:"1px solid #a0c8a0",color:"#1e2e1e",padding:"6px 10px",borderRadius:6,fontFamily:"inherit",fontSize:12,outline:"none",width:"100%",boxSizing:"border-box"},
+  ci:{background:"transparent",border:"none",fontFamily:"inherit",fontSize:12,padding:"4px 7px",width:"100%",minWidth:50,outline:"none",color:"#1e2e1e"}
+};
+function bS(v){var b={padding:"8px 18px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:600,fontSize:12,letterSpacing:.5,textTransform:"uppercase",whiteSpace:"nowrap"};if(v==="ok")return Object.assign({},b,{background:"#1a5c1a",color:"#fff"});if(v==="am")return Object.assign({},b,{background:"#b45309",color:"#fff"});if(v==="g")return Object.assign({},b,{background:"#fff",color:"#2d7a2d",border:"1px solid #a0c8a0"});return Object.assign({},b,{background:"#2d7a2d",color:"#fff"});}
+function dzS(a){return{border:"2px dashed "+(a?"#2d7a2d":"#a0c8a0"),borderRadius:10,padding:"44px 28px",textAlign:"center",cursor:"pointer",background:a?"#e8f5e822":"#fafcfa"};}
+function tdS(u,isHdr){return{padding:"2px 3px",borderBottom:"1px solid #c8e0c833",borderRight:"1px solid #c8e0c81a",background:u?"#fff3cd":isHdr?"#e8f5e8":"transparent",fontWeight:isHdr?600:400};}
+function tabS(a){return{padding:"10px 24px",borderRadius:"8px 8px 0 0",border:"none",cursor:"pointer",fontFamily:"inherit",fontWeight:600,fontSize:12,letterSpacing:.5,textTransform:"uppercase",background:a?"#ffffff":"rgba(26,92,26,0.5)",color:a?"#1e5c1e":"#c8f0c8",marginTop:4};}
+
+/* ═══ DOOR CONFIG ═══ */
+var DH=["OPENING","QUANTITY","OPENING_SIZE","OPENING_TYPE","DOOR_ARCHITECT_TYPE","DOOR_DESC","FRAME_ARCHITECT_TYPE","FRAME_DESC","WALL_CONDITION","HEAD","SILL","HDW_SET","OPENING_LABEL"];
+var DHL={OPENING:"Door No.",QUANTITY:"Qty",OPENING_SIZE:"Size Code",OPENING_TYPE:"AI/SG",DOOR_ARCHITECT_TYPE:"Door Type",DOOR_DESC:"Door Matl",FRAME_ARCHITECT_TYPE:"Frame Type",FRAME_DESC:"Frame Matl",WALL_CONDITION:"Jamb",HEAD:"Head",SILL:"Sill",HDW_SET:"Hdw Set",OPENING_LABEL:"Fire Rating"};
+var DIK=["OPENING","OPENING_WIDTH","OPENING_HEIGHT","DOOR_ARCHITECT_TYPE","DOOR_DESC_RAW","FRAME_ARCHITECT_TYPE","FRAME_DESC_RAW","WALL_CONDITION","HEAD","SILL","HDW_SET","OPENING_NOTE"];
+var DKL={OPENING:"Door No.",OPENING_WIDTH:"Width",OPENING_HEIGHT:"Height",DOOR_ARCHITECT_TYPE:"Door Type",DOOR_DESC_RAW:"Door Matl",FRAME_ARCHITECT_TYPE:"Frame Type",FRAME_DESC_RAW:"Frame Matl",WALL_CONDITION:"Jamb",HEAD:"Head",SILL:"Sill",HDW_SET:"Hdw Set",OPENING_NOTE:"Comments"};
+var DOPT=["DOOR_ARCHITECT_TYPE","FRAME_ARCHITECT_TYPE","WALL_CONDITION","HEAD","SILL","OPENING_LABEL"];
+function pD(s){var m=String(s||"").match(/(\d+)'-(\d+)/);if(!m)return null;return{f:parseInt(m[1],10),i:parseInt(m[2],10)};}
+function szC(w,h){var a=pD(w),b=pD(h);if(!a||!b)return"";return""+a.f+a.i+b.f+b.i;}
+function oT(w){var a=pD(w);if(!a)return"SG";return(a.f*12+a.i)>48?"AI":"SG";}
+function txDoor(rr){return rr.map(function(r){var g=function(k){return String(r[k]||"").trim();};return{OPENING:g("OPENING"),QUANTITY:1,OPENING_SIZE:szC(g("OPENING_WIDTH"),g("OPENING_HEIGHT")),OPENING_TYPE:oT(g("OPENING_WIDTH")),DOOR_ARCHITECT_TYPE:g("DOOR_ARCHITECT_TYPE"),DOOR_DESC:g("DOOR_DESC_RAW"),FRAME_ARCHITECT_TYPE:g("FRAME_ARCHITECT_TYPE"),FRAME_DESC:g("FRAME_DESC_RAW"),WALL_CONDITION:g("WALL_CONDITION"),HEAD:g("HEAD"),SILL:g("SILL"),HDW_SET:g("HDW_SET"),OPENING_LABEL:g("OPENING_LABEL"),__uncertain:r.uncertain||false};});}
+
+/* ═══ HARDWARE CONFIG ═══ */
+var HH=["Rec Type","Set/Qty/Note","Short Description","Catalog Number","Finish","Mfr Code"];
+var HHL={"Rec Type":"1=Set, 2=Item","Set/Qty/Note":"Set# or Qty","Short Description":"Description","Catalog Number":"Catalog #","Finish":"Finish","Mfr Code":"Manufacturer"};
+/* Raw extraction keys — what we ask Claude for */
+var HIK=["HDW_SET","QTY","DESCRIPTION","CATALOG","FINISH","MFR","OPENING_TYPE","SIZE_CODE"];
+var HKL={HDW_SET:"Set #",QTY:"Qty",DESCRIPTION:"Description",CATALOG:"Catalog #",FINISH:"Finish",MFR:"Mfr Code",OPENING_TYPE:"SG/AI",SIZE_CODE:"Size Code"};
+
+function exDoor(b,fn){return callAI(b,'Extract the DOOR SCHEDULE from this PDF.\nMap columns to: OPENING,OPENING_WIDTH,OPENING_HEIGHT,DOOR_ARCHITECT_TYPE,DOOR_DESC_RAW,FRAME_ARCHITECT_TYPE,FRAME_DESC_RAW,WALL_CONDITION,HEAD,SILL,HDW_SET,OPENING_NOTE,OPENING_LABEL\n(DOOR_DESC_RAW=door material, FRAME_DESC_RAW=frame material, WALL_CONDITION=jamb, OPENING_NOTE=comments)\nExtract ALL rows. Keep values exactly. Use "" for blanks. uncertain:true on unclear rows.\nReturn ONLY minified JSON:\n{"scheduleType":"Door Schedule","mapping":[{"pdfColumn":"NO.","importKey":"OPENING","confident":true}],"rows":[{"OPENING":"101"}]}',fn);}
+
+function exHdw(b,fn){return callAI(b,'Extract HARDWARE SCHEDULE from this PDF into flat JSON.\n\nFor each "Hardware Group No. XX", extract every line item.\nEach row: {"SET":"02","QTY":"4","DESC":"HINGE","CAT":"5BB1 4.5 X 4.5","FIN":"652","MFR":"IVE"}\n- SET = group number (2-digit zero-padded, e.g. "02","03","10")\n- QTY = quantity as a number string. Parse from formats like "3 EA", "(3)", "qty 3" etc.\n- DESC = short uppercase description (HINGE, CONT. HINGE, LOCK, SURFACE CLOSER, KICK PLATE, MOP PLATE, PANIC HARDWARE, FIRE EXIT HARDWARE, ELEC PANIC HARDWARE, REMOVABLE MULLION, FIRE RATED REMOVABLE MULLION, MULLION STORAGE KIT, RIM CYLINDER, MORTISE CYLINDER, FSIC CORE, CONSTRUCTION FSIC CORE, WALL STOP, PUSH PLATE, PULL PLATE, HEAVY DUTY FLOOR STOP, SECURITY FLOOR STOP/HOLDER, GASKETING, MULLION SEAL, DOOR SWEEP, THRESHOLD, ASTRAGAL, COORDINATOR, MOUNTING BRACKET, AUTO FLUSH BOLT, SEMI-AUTO FLUSH BOLT, SEMI-AUTO X AUTO FLUSH BOLT, DUST PROOF STRIKE, POWER TRANSFER, ELEC CLASSROOM LOCK, CLASSROOM LOCK, CLASSROOM SECURITY, STOREROOM LOCK, OFFICE, ELEC EXIT DEVICE TRIM, SEALS)\n- CAT = catalog/product number exactly as written in the PDF\n- FIN = finish code exactly as written (e.g. 652, 626, 689, 630, BK, AA, ORG, BLK, A)\n- MFR = single letter from the last column of the PDF (e.g. S, L, T, V, Z, I). Keep exactly as shown.\n\nExtract ALL groups and ALL items. Return ONLY minified JSON:\n{"scheduleType":"Hardware Schedule","rows":[...]}',fn,"claude-haiku-4-5-20251001");}
+
+/* ═══ HARDWARE RULES ENGINE (16 rules) ═══ */
+
+/* Mfr code mapping: PDF single-letter → 3-letter import code */
+var MFR_MAP = {I:"IVE",V:"VON",S:"SCH",L:"LCN",T:"TRI",Z:"ZER"};
+/* Description-based mfr fallbacks */
+function guessMfr(desc){
+  var d=desc.toUpperCase();
+  if(d.indexOf("HINGE")!==-1||d==="CONT. HINGE")return"IVE";
+  if(d.indexOf("PANIC")!==-1||d.indexOf("EXIT HARDWARE")!==-1||d.indexOf("MULLION")!==-1||d.indexOf("POWER TRANSFER")!==-1)return"VON";
+  if(d.indexOf("LOCK")!==-1||d.indexOf("CYLINDER")!==-1||d.indexOf("FSIC")!==-1||d.indexOf("OFFICE")!==-1||d.indexOf("CLASSROOM SECURITY")!==-1||d.indexOf("STOREROOM")!==-1)return"SCH";
+  if(d.indexOf("CLOSER")!==-1)return"LCN";
+  if(d.indexOf("PLATE")!==-1||d.indexOf("STOP")!==-1||d.indexOf("BOLT")!==-1||d.indexOf("COORDINATOR")!==-1||d.indexOf("BRACKET")!==-1||d.indexOf("STRIKE")!==-1)return"TRI";
+  if(d.indexOf("GASKET")!==-1||d.indexOf("SEAL")!==-1||d.indexOf("SWEEP")!==-1||d.indexOf("THRESHOLD")!==-1||d.indexOf("ASTRAGAL")!==-1)return"ZER";
+  if(d.indexOf("AD-300")!==-1||d.indexOf("ELEC EXIT DEVICE TRIM")!==-1)return"SCE";
+  if(d.indexOf("BY ")!==-1||d.indexOf("MANUFACTURER")!==-1)return"B/O";
+  return"";
+}
+
+/* Rule 14: Clean catalog numbers */
+function cleanCat(s){
+  var c=String(s||"").trim();
+  c=c.replace(/\s{2,}/g," "); /* collapse multi-spaces */
+  c=c.replace(/[''`]/g,"'");  /* normalize apostrophes */
+  c=c.replace(/[""]/g,'"');   /* normalize quotes */
+  c=c.replace(/\s*\/\s*/g,"/"); /* clean around slashes */
+  return c;
+}
+
+/* Rule 10: Parse qty from various formats */
+function parseQty(s){
+  var v=String(s||"").trim();
+  /* Already a plain number */
+  if(/^\d+$/.test(v))return v;
+  /* "(3)" format */
+  var m=v.match(/\((\d+)\)/);if(m)return m[1];
+  /* "qty 3" or "qty: 3" */
+  m=v.match(/qty[:\s]*(\d+)/i);if(m)return m[1];
+  /* "3 EA" or "3 hinges" etc */
+  m=v.match(/^(\d+)\s/);if(m)return m[1];
+  return v;
+}
+
+/* Rule 9/11: Classify hinge type */
+function isContHinge(desc){var d=String(desc||"").toUpperCase();return d.indexOf("CONT")!==-1||d.indexOf("CONTINUOUS")!==-1;}
+function isStdHinge(desc){var d=String(desc||"").toUpperCase();return(d==="HINGE"||d==="HINGES"||(/^HINGE\b/.test(d)&&!isContHinge(d)));}
+
+/* Rule 13: Standardize blanks */
+function stdVal(s){var v=String(s||"").trim();if(v===""||v==="-"||v==="--"||v.toUpperCase()==="N/A"||v.toUpperCase()==="NONE")return"";return v;}
+
+/* Main transform: raw AI rows → import format with all rules applied */
+function txHdw(raw){
+  var rows=raw.rows||[];
+  if(rows.length===0)return[];
+
+  /* Group items by set */
+  var sets={};var setOrder=[];
+  rows.forEach(function(r){
+    var s=String(r.SET||r.HDW_SET||"").trim().replace(/^0+/,"");
+    if(!s)return;
+    var padded=s.length<2?"0"+s:s;
+    if(!sets[padded]){sets[padded]=[];setOrder.push(padded);}
+    sets[padded].push(r);
+  });
+
+  var out=[];
+  var warnings=[];
+
+  setOrder.forEach(function(setNum){
+    var items=sets[setNum];
+    var stdHingeCount=0;var contHingeCount=0;var hingeSize="";
+    var processedItems=[];
+    var catSeen={};
+
+    /* First pass: normalize all items and count hinges */
+    items.forEach(function(r){
+      var desc=stdVal(r.DESC||r.DESCRIPTION||"").toUpperCase();
+      var cat=cleanCat(r.CAT||r.CATALOG||"");
+      var fin=stdVal(r.FIN||r.FINISH||"");
+      var qty=parseQty(r.QTY||"");
+      var rawMfr=stdVal(r.MFR||"").toUpperCase();
+
+      /* Rule 8: blank finish → NA */
+      if(!fin)fin="NA";
+
+      /* Resolve mfr code: try PDF single-letter → 3-letter, then guess from desc */
+      var mfr=MFR_MAP[rawMfr]||"";
+      if(!mfr){
+        /* Check if it's already a 3-letter code */
+        if(rawMfr.length===3)mfr=rawMfr;
+        /* Check compound codes like "SC" "LC" "TR" "VO" "IV" "ZE" */
+        else if(rawMfr==="SC"||rawMfr==="SCH")mfr="SCH";
+        else if(rawMfr==="LC"||rawMfr==="LCN")mfr="LCN";
+        else if(rawMfr==="TR"||rawMfr==="TRI")mfr="TRI";
+        else if(rawMfr==="VO"||rawMfr==="VON")mfr="VON";
+        else if(rawMfr==="IV"||rawMfr==="IVE")mfr="IVE";
+        else if(rawMfr==="ZE"||rawMfr==="ZER")mfr="ZER";
+        else if(rawMfr==="B/"||rawMfr==="B/O")mfr="B/O";
+        else mfr=guessMfr(desc);
+      }
+
+      /* Rule 9: Normalize hinge descriptions */
+      if(isContHinge(desc)){desc="CONT. HINGE";contHingeCount+=parseInt(qty,10)||0;}
+      else if(isStdHinge(desc)){desc="HINGE";stdHingeCount+=parseInt(qty,10)||0;if(cat)hingeSize=cat;}
+
+      /* Rule 7: Threshold — append door width to catalog */
+      if(desc.indexOf("THRESHOLD")!==-1){
+        /* Determine width from set context: SG~36", AI~72" (computed later, so we mark it) */
+        cat=cat+"__THRESH__";
+      }
+
+      /* Rule 15: Detect duplicates within set */
+      var dupKey=desc+"|"+cat+"|"+fin+"|"+mfr;
+      var isDup=false;
+      if(catSeen[dupKey]){isDup=true;}
+      catSeen[dupKey]=true;
+
+      processedItems.push({desc:desc,cat:cat,fin:fin,qty:qty,mfr:mfr,isDup:isDup,uncertain:r.uncertain||false});
+    });
+
+    /* Rules 1-6: Determine set type and size from hinge counts */
+    var totalHinges=stdHingeCount;
+    var openType="";var sizeCode="";var setFlag=false;
+
+    if(contHingeCount>0 && stdHingeCount>0){
+      /* Rule 12: Both types → flag */
+      setFlag=true;openType="SG";sizeCode="3080";
+    } else if(contHingeCount>0 && stdHingeCount===0){
+      /* Rule 5: 1+ cont hinge, no std → SG 3080 */
+      openType="SG";sizeCode="3080";
+    } else if(totalHinges>=7){
+      /* Rule 4: 7-8 → AI 6080 */
+      openType="AI";sizeCode="6080";
+    } else if(totalHinges>=5){
+      /* Rule 3: 5-6 → AI 6070 */
+      openType="AI";sizeCode="6070";
+    } else if(totalHinges===4){
+      /* Rule 2: 4 → SG 3080 */
+      openType="SG";sizeCode="3080";
+    } else if(totalHinges>=2){
+      /* Rule 1: 2-3 → SG 3070 */
+      openType="SG";sizeCode="3070";
+    } else {
+      /* Rule 6: 0 hinges → flag */
+      setFlag=true;openType="??";sizeCode="????";
+    }
+
+    /* Refine size code from hinge dimensions if available */
+    if(hingeSize && !setFlag){
+      /* e.g. "5BB1HW 5 X 4.5" → 5" wide = taller door */
+      var hm=hingeSize.match(/(\d+(?:\.\d+)?)\s*[Xx]\s*(\d+(?:\.\d+)?)/);
+      if(hm){
+        var hw=parseFloat(hm[1]),hh=parseFloat(hm[2]);
+        /* 5x4.5 hinges → typically 8'0" doors (x080), 4.5x4.5 → 7'0" (x070 or x080) */
+        if(openType==="AI"){
+          sizeCode=(hw>=5)?"6080":"6070";
+        } else {
+          sizeCode=(hw>=5)?"3080":"3080"; /* SG stays 3080 for 4-hinge standard */
+        }
+      }
+    }
+
+    /* Determine threshold width based on type */
+    var threshWidth=openType==="AI"?"72":"36";
+
+    /* Emit set header (Rec Type 1) */
+    out.push({"Rec Type":"1","Set/Qty/Note":setNum,"Short Description":openType,"Catalog Number":sizeCode,"Finish":"","Mfr Code":"",__uncertain:setFlag,__isHdr:true});
+
+    /* Emit line items (Rec Type 2) */
+    processedItems.forEach(function(item){
+      var cat=item.cat;
+      /* Rule 7 finalize: replace threshold placeholder with width */
+      if(cat.indexOf("__THRESH__")!==-1){
+        cat=cat.replace("__THRESH__"," "+threshWidth);
+      }
+      var flag=item.uncertain||item.isDup||setFlag;
+      out.push({"Rec Type":"2","Set/Qty/Note":item.qty,"Short Description":item.desc,"Catalog Number":cat,"Finish":item.fin,"Mfr Code":item.mfr,__uncertain:flag,__isHdr:false});
+    });
+  });
+
+  return out;
+}
+
+/* ═══ UPLOAD PANEL ═══ */
+function Upload(props){
+  var _d=useState(false),drag=_d[0],setDrag=_d[1];
+  var ref=useRef();
+  function hf(f){if(!f||f.type!=="application/pdf")return;props.setFile(f);}
+  return (
+    <div style={S.card}>
+      <span style={S.lbl}>Upload {props.label} PDF</span>
+      <div style={dzS(drag)} onDragOver={function(e){e.preventDefault();setDrag(true);}} onDragLeave={function(){setDrag(false);}} onDrop={function(e){e.preventDefault();setDrag(false);hf(e.dataTransfer.files[0]);}} onClick={function(){ref.current.click();}}>
+        <div style={{fontSize:40,marginBottom:12}}>📄</div>
+        <div style={{fontSize:15,color:"#1e5c1e",marginBottom:6}}>{props.file?props.file.name:"Drop your "+props.label.toLowerCase()+" PDF here"}</div>
+        <div style={{fontSize:11,color:"#6a9a6a"}}>or click to browse</div>
+        {props.file?<div style={{marginTop:10,fontSize:11,color:"#2d7a2d"}}>✓ Ready</div>:null}
+      </div>
+      <input ref={ref} type="file" accept=".pdf" style={{display:"none"}} onChange={function(e){hf(e.target.files[0]);}}/>
+      <div style={{marginTop:18,display:"flex",gap:10,alignItems:"center"}}>
+        <button style={bS()} disabled={!props.file||props.busy} onClick={props.onGo}>{props.busy?"⏳ Extracting…":"🔍 Extract Schedule"}</button>
+        {props.busy?<span style={{color:"#5a9e5a",fontSize:11,fontStyle:"italic"}}>{props.prog}</span>:null}
+      </div>
+      {props.err?<div style={{background:"#fef3c7",border:"1px solid #92400e",borderRadius:8,padding:"10px 16px",marginTop:14,color:"#92400e",fontSize:12}}>⚠️ {props.err}</div>:null}
+      {props.info?<div style={{marginTop:24}}>{props.info}</div>:null}
+    </div>
+  );
+}
+
+/* ═══ REVIEW GRID ═══ */
+function Grid(props){
+  var rows=props.rows,setRows=props.setRows,hdrs=props.hdrs,setHdrs=props.setHdrs,hlbl=props.hlbl;
+  var _u=useState(false),uOnly=_u[0],setUO=_u[1];
+  var _eh=useState(null),eH=_eh[0],setEH=_eh[1];
+  function upC(i,h,v){setRows(function(p){return p.map(function(r,j){if(j!==i)return r;var o=Object.assign({},r);o[h]=v;o.__uncertain=false;return o;});});}
+  function addR(){var o={__uncertain:false,__isHdr:false};hdrs.forEach(function(h){o[h]="";});setRows(function(p){return p.concat([o]);});}
+  function delR(i){setRows(function(p){return p.filter(function(_,j){return j!==i;});});}
+  function addC(){var n=prompt("Column name:");if(!n)return;setHdrs(function(p){return p.concat([n]);});setRows(function(p){return p.map(function(r){var x=Object.assign({},r);x[n]="";return x;});});}
+  function renH(o,n){if(!n||n===o)return;setHdrs(function(p){return p.map(function(h){return h===o?n:h;});});setRows(function(p){return p.map(function(r){var x=Object.assign({},r);x[n]=r[o];delete x[o];return x;});});setEH(null);}
+  function delC(k){setHdrs(function(p){return p.filter(function(h){return h!==k;});});setRows(function(p){return p.map(function(r){var x=Object.assign({},r);delete x[k];return x;});});}
+  function expC(){dlBlob(mkCSV(rows,hdrs),(props.file?props.file.name.replace(".pdf",""):"schedule")+".csv","text/csv");}
+  async function expX(){await dlXLSX(rows,hdrs,(props.file?props.file.name.replace(".pdf",""):"schedule")+".xlsx");}
+  var uCnt=rows.filter(function(r){return r.__uncertain;}).length;
+  var dR=uOnly?rows.filter(function(r){return r.__uncertain;}):rows;
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
+        <div>
+          <div style={{fontSize:16,fontWeight:700,color:"#1e2e1e"}}>{props.title||"Schedule"}</div>
+          <div style={{fontSize:11,color:"#6a9a6a"}}>{rows.length} rows · {hdrs.length} cols{props.file?" · "+props.file.name:""}</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:8,flexWrap:"wrap"}}>
+          {uCnt>0?<button style={bS(uOnly?"am":"g")} onClick={function(){setUO(function(p){return !p;});}}>⚠️ {uCnt} uncertain</button>:null}
+          {props.onMap?<button style={bS("g")} onClick={props.onMap}>← Mapping</button>:null}
+          <button style={bS("g")} onClick={props.onNew}>← New File</button>
+          <button style={bS()} onClick={expC}>⬇ CSV</button>
+          <button style={bS("ok")} onClick={expX}>⬇ XLSX</button>
+        </div>
+      </div>
+      {props.trunc?<div style={{background:"#fef3c7",border:"1px solid #92400e",borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:11,color:"#92400e"}}>⚠️ <strong>Truncated</strong> — add missing rows with + Row.</div>:null}
+      {uCnt>0&&!uOnly?<div style={{background:"#fef3c7",border:"1px solid #92400e",borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:11,color:"#92400e"}}>⚠️ {uCnt} rows flagged.</div>:null}
+      <div style={S.card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <span style={S.lbl}>Review &amp; Edit</span>
+          <div style={{display:"flex",gap:8}}>
+            <button style={bS("g")} onClick={addC}>+ Column</button>
+            <button style={bS("g")} onClick={addR}>+ Row</button>
+          </div>
+        </div>
+        <div style={{overflowX:"auto",maxHeight:"65vh",overflowY:"auto",borderRadius:7,border:"1px solid #c8e0c8"}}>
+          <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+            <thead><tr>
+              <th style={Object.assign({},S.th,{width:30,textAlign:"center"})}>#</th>
+              {hdrs.map(function(h){return(
+                <th key={h} style={S.th}>
+                  {eH&&eH.key===h?<input autoFocus style={Object.assign({},S.ci,{color:"#1e2e1e",fontSize:10,background:"#f5f7f5",border:"1px solid #2d7a2d",borderRadius:4,padding:"2px 6px"})} value={eH.value} onChange={function(e){setEH({key:h,value:e.target.value});}} onBlur={function(){renH(h,eH.value);}} onKeyDown={function(e){if(e.key==="Enter")renH(h,eH.value);if(e.key==="Escape")setEH(null);}}/>
+                  :<div style={{display:"flex",alignItems:"center",gap:5}}><span style={{cursor:"text",flex:1}} onClick={function(){setEH({key:h,value:h});}}>{h}</span><button onClick={function(){delC(h);}} style={{background:"none",border:"none",color:"rgba(229,83,51,.5)",cursor:"pointer",fontSize:13,padding:"0 2px",lineHeight:1}}>×</button></div>}
+                  {hlbl[h]?<div style={S.thSub}>{hlbl[h]}</div>:null}
+                </th>
+              );})}
+              <th style={Object.assign({},S.th,{width:36})}></th>
+            </tr></thead>
+            <tbody>
+              {dR.map(function(row,ri){
+                var ai=uOnly?rows.indexOf(row):ri;
+                var isH=row.__isHdr||false;
+                return(
+                  <tr key={ai} style={{background:isH?"#e8f5e8":ri%2?"#f5faf5":"transparent"}}>
+                    <td style={Object.assign({},tdS(row.__uncertain,isH),{textAlign:"center",color:row.__uncertain?"#b45309":"#9ab89a",fontSize:9})}>{row.__uncertain?"⚠":ai+1}</td>
+                    {hdrs.map(function(h){return(
+                      <td key={h} style={tdS(row.__uncertain,isH)}>
+                        <input style={Object.assign({},S.ci,{color:row.__uncertain?"#92400e":"#1e2e1e",fontWeight:isH?600:400})} value={row[h]||""} onChange={function(e){upC(ai,h,e.target.value);}}/>
+                      </td>
+                    );})}
+                    <td style={tdS(row.__uncertain,isH)}>
+                      <button onClick={function(){delR(ai);}} style={{background:"none",border:"none",color:"#e55333",cursor:"pointer",fontSize:15,padding:"2px 6px"}}>×</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{marginTop:10,fontSize:10,color:"#6a9a6a"}}>💡 Click header to rename · × deletes column/row · Green rows = set headers (Rec Type 1)</div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ MAPPING POPUP ═══ */
+function MapPop(props){
+  var _s=useState(props.mapping.map(function(m){return Object.assign({},m);})),loc=_s[0],setLoc=_s[1];
+  var _c1=useState(""),cp=_c1[0],sCP=_c1[1];
+  var _c2=useState(""),ck=_c2[0],sCK=_c2[1];
+  var ak=props.impKeys.slice();loc.forEach(function(m){if(ak.indexOf(m.importKey)===-1)ak.push(m.importKey);});
+  function uK(i,v){setLoc(function(p){return p.map(function(m,j){return j===i?Object.assign({},m,{importKey:v,confident:true}):m;});});}
+  function dl(i){setLoc(function(p){return p.filter(function(_,j){return j!==i;});});}
+  function aC(){if(cp&&ck){setLoc(function(p){return p.concat([{pdfColumn:cp,importKey:ck,confident:true}]);});sCP("");sCK("");}}
+  function go(){
+    var kr=props.rawRows.map(function(row){var r={uncertain:row.uncertain||false};loc.forEach(function(m){r[m.importKey]=row[m.importKey]!=null?row[m.importKey]:(row[m.pdfColumn]!=null?row[m.pdfColumn]:"");});return r;});
+    props.onOk(kr,new Set(loc.map(function(m){return m.importKey;})));
+  }
+  var lc=loc.filter(function(m){return !m.confident;}).length;
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.8)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:"#fff",border:"1px solid #c8e0c8",borderRadius:14,boxShadow:"0 8px 32px rgba(0,0,0,.1)",width:"100%",maxWidth:780,maxHeight:"90vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+        <div style={{padding:"20px 28px",borderBottom:"1px solid #c8e0c8",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16}}>
+          <div><div style={{fontSize:15,fontWeight:700,color:"#1e2e1e",marginBottom:4}}>{props.title||"Column Mapping"}</div><div style={{fontSize:11,color:"#5a9e5a"}}>{loc.length} columns.{lc>0?<span style={{color:"#92400e"}}> {lc} flagged.</span>:null}</div></div>
+          <button style={bS("g")} onClick={props.onBack}>← Back</button>
+        </div>
+        <div style={{overflowY:"auto",padding:"12px 28px 16px",flex:1}}>
+          {loc.map(function(m,i){return(
+            <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 20px 1fr 70px 32px",gap:10,alignItems:"center",marginBottom:7,borderRadius:6,padding:"3px 0",background:!m.confident?"rgba(255,248,225,.2)":"transparent"}}>
+              <div style={{background:"#f0f7f0",border:"1px solid #c8e0c8",borderRadius:6,padding:"7px 10px",fontSize:11,color:"#1e5c1e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.pdfColumn}</div>
+              <div style={{textAlign:"center",color:"#3a7a3a",fontSize:14}}>→</div>
+              <select value={m.importKey} onChange={function(e){uK(i,e.target.value);}} style={Object.assign({},S.inp,{cursor:"pointer"})}>{ak.map(function(k){return <option key={k} value={k}>{k}{props.keyLbl[k]?" — "+props.keyLbl[k]:""}</option>;})}</select>
+              <div style={{fontSize:9,fontWeight:700,textTransform:"uppercase",textAlign:"center",color:m.confident?"#1a5c1a":"#b45309"}}>{m.confident?"✓":"⚠"}</div>
+              <button onClick={function(){dl(i);}} style={{background:"#fef3c7",border:"1px solid rgba(127,29,29,.25)",borderRadius:6,color:"#b45309",cursor:"pointer",fontSize:15,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+            </div>
+          );})}
+          <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid rgba(200,224,200,.3)"}}>
+            <div style={{fontSize:10,color:"#5a9e5a",marginBottom:8}}>Add column:</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 20px 1fr auto",gap:10,alignItems:"center"}}>
+              <input style={S.inp} placeholder="PDF column" value={cp} onChange={function(e){sCP(e.target.value);}}/>
+              <div style={{textAlign:"center",color:"#6a9a6a"}}>→</div>
+              <input style={S.inp} placeholder="Import key" value={ck} onChange={function(e){sCK(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")aC();}}/>
+              <button style={bS("g")} onClick={aC}>+</button>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:"16px 28px",borderTop:"1px solid #c8e0c8",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:11,color:"#6a9a6a"}}>{loc.length} cols · {props.rawRows.length} rows</div>
+          <button style={bS("ok")} onClick={go}>Confirm →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ DOOR TAB ═══ */
+function DoorTab(){
+  var _st=useState("up"),st=_st[0],sSt=_st[1];
+  var _fi=useState(null),fi=_fi[0],sFi=_fi[1];
+  var _rr=useState(null),rr=_rr[0],sRR=_rr[1];
+  var _er=useState([]),er=_er[0],sER=_er[1];
+  var _e=useState(""),err=_e[0],sE=_e[1];
+  var _p=useState(""),pg=_p[0],sP=_p[1];
+  var _ah=useState(DH.slice()),ah=_ah[0],sAH=_ah[1];
+  async function go(){if(!fi)return;sSt("busy");sE("");sP("Reading…");try{var b=await f2b64(fi);var r=await exDoor(b,sP);sRR(r);sSt("map");}catch(e){sE(e.message);sSt("up");}sP("");}
+  function onMap(kr,mk){var fr=txDoor(kr);var h=DH.filter(function(hh){return DOPT.indexOf(hh)===-1||mk.has(hh);});sAH(h);sER(fr);sSt("rev");}
+  var info=(<div><span style={S.lbl}>Auto-transform rules</span><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:8}}>{[["QUANTITY","Always 1"],["OPENING_SIZE","3'-0\" x 7'-0\" → 3070"],["OPENING_TYPE","Width > 4'-0\" → AI else SG"]].map(function(p){return <div key={p[0]} style={{background:"#f0f7f0",borderRadius:7,padding:"9px 12px",border:"1px solid #c8e0c8"}}><div style={{fontSize:9,fontWeight:700,color:"#2d7a2d",letterSpacing:1,marginBottom:3}}>{p[0]}</div><div style={{fontSize:10,color:"#3a6a3a"}}>{p[1]}</div></div>;})}</div></div>);
+  if(st==="up"||st==="busy")return <Upload file={fi} setFile={sFi} onGo={go} busy={st==="busy"} prog={pg} err={err} info={info} label="Door Schedule"/>;
+  if(st==="map"&&rr)return <MapPop mapping={rr.mapping||[]} rawRows={rr.rows||[]} impKeys={DIK} keyLbl={DKL} onOk={onMap} onBack={function(){sSt("up");}} title="Door Schedule — Mapping"/>;
+  if(st==="rev")return <Grid rows={er} setRows={sER} hdrs={ah} setHdrs={sAH} hlbl={DHL} file={fi} title={rr?rr.scheduleType:"Door Schedule"} trunc={rr?rr._truncated:false} onNew={function(){sSt("up");sFi(null);sER([]);}} onMap={function(){sSt("map");}}/>;
+  return null;
+}
+
+/* ═══ HARDWARE TAB ═══ */
+function HdwTab(){
+  var _st=useState("up"),st=_st[0],sSt=_st[1];
+  var _fi=useState(null),fi=_fi[0],sFi=_fi[1];
+  var _rr=useState(null),rr=_rr[0],sRR=_rr[1];
+  var _er=useState([]),er=_er[0],sER=_er[1];
+  var _e=useState(""),err=_e[0],sE=_e[1];
+  var _p=useState(""),pg=_p[0],sP=_p[1];
+  var _ah=useState(HH.slice()),ah=_ah[0],sAH=_ah[1];
+
+  async function go(){
+    if(!fi)return;sSt("busy");sE("");sP("Reading…");
+    try{var b=await f2b64(fi);var r=await exHdw(b,sP);sRR(r);
+      /* Hardware skips mapping — go straight to review */
+      var final=txHdw(r);sAH(HH.slice());sER(final);sSt("rev");
+    }catch(e){sE(e.message);sSt("up");}sP("");
+  }
+
+  var info=(<div><span style={S.lbl}>Import Format &amp; Auto-Rules</span>
+    <div style={{fontSize:11,color:"#3a6a3a",marginBottom:12,lineHeight:1.6}}>Extracts into 6-column import format. <strong>Rec Type 1</strong> = set header, <strong>Rec Type 2</strong> = line item. After extraction, 16 post-processing rules are applied automatically:</div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:8}}>
+    {[
+      ["Hinge → Set Type","2-3 hinges=SG/3070, 4=SG/3080, 5-6=AI/6070, 7-8=AI/6080"],
+      ["Cont. Hinge","1 cont. hinge=SG/3080. Both types in same set → flagged"],
+      ["No Hinges","Set flagged for review with ?? type"],
+      ["Thresholds","Door width appended to catalog (36\" or 72\")"],
+      ["Blank Finish","Filled with NA automatically"],
+      ["Mfr Codes","Auto-resolved: IVE/VON/SCH/LCN/TRI/ZER/SCE/B/O"],
+      ["Catalog Cleanup","Extra spaces, OCR errors cleaned"],
+      ["Duplicates","Duplicate lines within a set flagged ⚠️"]
+    ].map(function(p){return <div key={p[0]} style={{background:"#f0f7f0",borderRadius:7,padding:"8px 12px",border:"1px solid #c8e0c8"}}><div style={{fontSize:9,fontWeight:700,color:"#2d7a2d",letterSpacing:1,marginBottom:2}}>{p[0]}</div><div style={{fontSize:10,color:"#3a6a3a"}}>{p[1]}</div></div>;})}
+    </div>
+  </div>);
+
+  if(st==="up"||st==="busy")return <Upload file={fi} setFile={sFi} onGo={go} busy={st==="busy"} prog={pg} err={err} info={info} label="Hardware Schedule"/>;
+  if(st==="rev")return <Grid rows={er} setRows={sER} hdrs={ah} setHdrs={sAH} hlbl={HHL} file={fi} title="Hardware Schedule" trunc={rr?rr._truncated:false} onNew={function(){sSt("up");sFi(null);sER([]);sRR(null);}}/>;
+  return null;
+}
+
+/* ═══ APP ═══ */
+function App(){
+  var _t=useState("door"),tab=_t[0],sTab=_t[1];
+  return(
+    <div style={S.app}>
+      <div style={S.hdr}>
+        <div style={{width:40,height:40,background:"#1a5c1a",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:13,flexShrink:0}}>CHC</div>
+        <div style={{flex:1,minWidth:180}}>
+          <div style={{fontSize:17,fontWeight:700,color:"#fff",letterSpacing:2,textTransform:"uppercase"}}>CHC Schedule Importer</div>
+          <div style={{fontSize:11,color:"#c8f0c8",letterSpacing:.5}}>PDF Extraction &amp; Import Tool</div>
+        </div>
+      </div>
+      <div style={{background:"linear-gradient(135deg,#1e5c1e,#1a4a1a)",padding:"0 32px",display:"flex",gap:4}}>
+        <button style={tabS(tab==="door")} onClick={function(){sTab("door");}}>🚪 Door Schedule</button>
+        <button style={tabS(tab==="hdw")} onClick={function(){sTab("hdw");}}>🔩 Hardware Schedule</button>
+      </div>
+      <div style={S.main}>
+        {tab==="door"?<DoorTab/>:null}
+        {tab==="hdw"?<HdwTab/>:null}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>
