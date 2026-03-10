@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CHC Schedule Importer</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', 'Segoe UI', sans-serif; }
+    select { -webkit-appearance: none; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #a0c8a0; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+var { useState, useRef } = React;
+
+/* ═══════════ SHARED UTILITIES ═══════════ */
+var TICKS = String.fromCharCode(96,96,96);
+var WORKER_URL = "https://solitary-disk-4751.austin-childers.workers.dev/";
+
+function fileToBase64(file) {
+  return new Promise(function(res, rej) {
+    var r = new FileReader();
+    r.onload = function() { res(r.result.split(",")[1]); };
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+function downloadBlob(content, filename, mime) {
+  var blob = new Blob([content], { type: mime });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+}
+
+var XLSX_LIB = null;
+function loadSheetJS() {
+  return new Promise(function(resolve, reject) {
+    if (XLSX_LIB) return resolve(XLSX_LIB);
+    if (window.XLSX) { XLSX_LIB = window.XLSX; return resolve(XLSX_LIB); }
+    var s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    s.onload = function() { XLSX_LIB = window.XLSX; resolve(XLSX_LIB); };
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function doDownloadXLSX(rows, headers, filename) {
+  var XL = await loadSheetJS();
+  var wsData = [headers].concat(rows.map(function(r) { return headers.map(function(h) { return r[h] || ""; }); }));
+  var ws = XL.utils.aoa_to_sheet(wsData);
+  var wb = XL.utils.book_new();
+  XL.utils.book_append_sheet(wb, ws, "IMPORT");
+  XL.writeFile(wb, filename);
+}
+
+function toCSV(rows, headers) {
+  var esc = function(v) { return '"' + String(v || "").replace(/"/g, '""') + '"'; };
+  var lines = [headers.map(esc).join(",")];
+  rows.forEach(function(r) { lines.push(headers.map(function(h) { return esc(r[h]); }).join(",")); });
+  return lines.join("\n");
+}
+
+/* ═══════════ STYLES ═══════════ */
+var S = {
+  app: { minHeight:"100vh", background:"#f5f7f5", color:"#1e2e1e", fontFamily:"'Inter','Segoe UI','Helvetica Neue',sans-serif", paddingBottom:60 },
+  header: { background:"linear-gradient(135deg,#2d7a2d,#1e5c1e)", borderBottom:"2px solid #1a5c1a", padding:"16px 32px", display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" },
+  logo: { width:40, height:40, borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden", background:"#fff", padding:3, flexShrink:0 },
+  main: { maxWidth:1340, margin:"0 auto", padding:"24px 20px" },
+  card: { background:"#ffffff", border:"1px solid #c8e0c8", borderRadius:10, padding:24, marginBottom:20, boxShadow:"0 1px 4px #00000010" },
+  label: { fontSize:10, letterSpacing:3, textTransform:"uppercase", color:"#2d7a2d", marginBottom:12, fontWeight:700, display:"block" },
+  th: { background:"#e8f5e8", padding:"8px 10px", fontSize:10, letterSpacing:.5, textTransform:"uppercase", color:"#1e5c1e", whiteSpace:"nowrap", borderBottom:"1px solid #c8e0c8", borderRight:"1px solid #c8e0c822", textAlign:"left", position:"sticky", top:0, zIndex:2 },
+  thSub: { fontSize:9, color:"#5a9e5a", fontWeight:400, letterSpacing:0, textTransform:"none" },
+  input: { background:"#f5f7f5", border:"1px solid #a0c8a0", color:"#1e2e1e", padding:"6px 10px", borderRadius:6, fontFamily:"inherit", fontSize:12, outline:"none", width:"100%", boxSizing:"border-box" },
+  cellInput: { background:"transparent", border:"none", fontFamily:"inherit", fontSize:12, padding:"4px 7px", width:"100%", minWidth:60, outline:"none", color:"#1e2e1e" },
+};
+
+function btnS(v) {
+  var base = { padding:"8px 18px", borderRadius:6, border:"none", cursor:"pointer", fontFamily:"inherit", fontWeight:600, fontSize:12, letterSpacing:.5, textTransform:"uppercase", whiteSpace:"nowrap" };
+  if (v === "success") return Object.assign({}, base, { background:"#1a5c1a", color:"#fff" });
+  if (v === "amber") return Object.assign({}, base, { background:"#b45309", color:"#fff" });
+  if (v === "ghost") return Object.assign({}, base, { background:"#fff", color:"#2d7a2d", border:"1px solid #a0c8a0" });
+  return Object.assign({}, base, { background:"#2d7a2d", color:"#fff" });
+}
+
+function dzStyle(active) {
+  return { border: "2px dashed " + (active ? "#2d7a2d" : "#a0c8a0"), borderRadius:10, padding:"44px 28px", textAlign:"center", cursor:"pointer", transition:"all .2s", background: active ? "#e8f5e822" : "#fafcfa" };
+}
+
+function tdS(u) {
+  return { padding:"2px 3px", borderBottom:"1px solid #c8e0c833", borderRight:"1px solid #c8e0c81a", background: u ? "#fff3cd" : "transparent" };
+}
+
+function tabS(active) {
+  return { padding:"10px 24px", borderRadius:"8px 8px 0 0", border:"none", cursor:"pointer", fontFamily:"inherit", fontWeight:600, fontSize:12, letterSpacing:.5, textTransform:"uppercase", background: active ? "#ffffff" : "rgba(26,92,26,0.5)", color: active ? "#1e5c1e" : "#c8f0c8", transition:"all .15s", marginTop:4 };
+}
+
+/* ═══════════ DOOR CONFIG ═══════════ */
+var DOOR_HDRS = ["OPENING","QUANTITY","OPENING_SIZE","OPENING_TYPE","DOOR_ARCHITECT_TYPE","DOOR_DESC","FRAME_ARCHITECT_TYPE","FRAME_DESC","WALL_CONDITION","HEAD","SILL","HDW_SET","OPENING_LABEL"];
+var DOOR_HDR_LBL = { OPENING:"Door No.",QUANTITY:"Qty",OPENING_SIZE:"Size Code",OPENING_TYPE:"Type (AI/SG)",DOOR_ARCHITECT_TYPE:"Door Type",DOOR_DESC:"Door Material",FRAME_ARCHITECT_TYPE:"Frame Type",FRAME_DESC:"Frame Material",WALL_CONDITION:"Jamb Detail",HEAD:"Head Detail",SILL:"Sill Detail",HDW_SET:"Hardware Set",OPENING_LABEL:"Fire Rating" };
+var DOOR_IMP_KEYS = ["OPENING","OPENING_WIDTH","OPENING_HEIGHT","DOOR_ARCHITECT_TYPE","DOOR_DESC_RAW","FRAME_ARCHITECT_TYPE","FRAME_DESC_RAW","WALL_CONDITION","HEAD","SILL","HDW_SET","OPENING_NOTE"];
+var DOOR_KEY_LBL = { OPENING:"Door No.",OPENING_WIDTH:"Width",OPENING_HEIGHT:"Height",DOOR_ARCHITECT_TYPE:"Door Type",DOOR_DESC_RAW:"Door Material",FRAME_ARCHITECT_TYPE:"Frame Type",FRAME_DESC_RAW:"Frame Material",WALL_CONDITION:"Jamb Detail",HEAD:"Head Detail",SILL:"Sill Detail",HDW_SET:"Hardware Set",OPENING_NOTE:"Comments" };
+var DOOR_OPT = ["DOOR_ARCHITECT_TYPE","FRAME_ARCHITECT_TYPE","WALL_CONDITION","HEAD","SILL","OPENING_LABEL"];
+
+function parseDim(s) { var m = String(s||"").match(/(\d+)'-(\d+)/); if(!m) return null; return { ft:parseInt(m[1],10), inch:parseInt(m[2],10) }; }
+function toSizeCode(w,h) { var ww=parseDim(w), hh=parseDim(h); if(!ww||!hh) return ""; return ""+ww.ft+ww.inch+hh.ft+hh.inch; }
+function toOpeningType(w) { var ww=parseDim(w); if(!ww) return "SG"; return (ww.ft*12+ww.inch)>48?"AI":"SG"; }
+
+function transformDoorRows(rawRows) {
+  return rawRows.map(function(row) {
+    var g = function(k) { return String(row[k]||"").trim(); };
+    return { OPENING:g("OPENING"), QUANTITY:1, OPENING_SIZE:toSizeCode(g("OPENING_WIDTH"),g("OPENING_HEIGHT")), OPENING_TYPE:toOpeningType(g("OPENING_WIDTH")), DOOR_ARCHITECT_TYPE:g("DOOR_ARCHITECT_TYPE"), DOOR_DESC:g("DOOR_DESC_RAW"), FRAME_ARCHITECT_TYPE:g("FRAME_ARCHITECT_TYPE"), FRAME_DESC:g("FRAME_DESC_RAW"), WALL_CONDITION:g("WALL_CONDITION"), HEAD:g("HEAD"), SILL:g("SILL"), HDW_SET:g("HDW_SET"), OPENING_LABEL:g("OPENING_LABEL"), __uncertain:row.uncertain||false };
+  });
+}
+
+/* ═══════════ HARDWARE CONFIG ═══════════ */
+var HDW_HDRS = ["HDW_SET","ITEM_NO","QTY","MANUFACTURER","PRODUCT","DESCRIPTION","FINISH","NOTES"];
+var HDW_HDR_LBL = { HDW_SET:"Hdw Set",ITEM_NO:"Item #",QTY:"Qty",MANUFACTURER:"Manufacturer",PRODUCT:"Product / Cat #",DESCRIPTION:"Description",FINISH:"Finish",NOTES:"Notes" };
+var HDW_IMP_KEYS = ["HDW_SET","ITEM_NO","QTY","MANUFACTURER","PRODUCT","DESCRIPTION","FINISH","NOTES"];
+
+/* ═══════════ API ═══════════ */
+function cleanJSON(raw) {
+  var re = new RegExp("^" + TICKS + "json|^" + TICKS + "|" + TICKS + "$", "gm");
+  return raw.replace(re, "").trim();
+}
+
+async function callClaude(b64, prompt, onProgress) {
+  onProgress("Sending to AI…");
+  var resp = await fetch(WORKER_URL, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:16000,
+      messages:[{role:"user",content:[
+        {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64}},
+        {type:"text",text:prompt}
+      ]}]
+    })
+  });
+  var data = await resp.json();
+  if(data.error) throw new Error(data.error.message);
+  var raw = data.content.map(function(b){return b.text||"";}).join("").trim();
+  var clean = cleanJSON(raw);
+  try { return JSON.parse(clean); }
+  catch(e) {
+    var idx = clean.lastIndexOf("},");
+    if(idx===-1) throw new Error("Could not parse response.");
+    try { var p2 = JSON.parse(clean.slice(0,idx+1)+"]}"); p2._truncated=true; return p2; }
+    catch(e2) { throw new Error("Response too large to parse."); }
+  }
+}
+
+function extractDoor(b64, fn) {
+  return callClaude(b64, 'Extract the DOOR SCHEDULE from this PDF.\nMap columns to: OPENING,OPENING_WIDTH,OPENING_HEIGHT,DOOR_ARCHITECT_TYPE,DOOR_DESC_RAW,FRAME_ARCHITECT_TYPE,FRAME_DESC_RAW,WALL_CONDITION,HEAD,SILL,HDW_SET,OPENING_NOTE,OPENING_LABEL\n(DOOR_DESC_RAW=door material, FRAME_DESC_RAW=frame material, WALL_CONDITION=jamb, OPENING_NOTE=comments)\nExtract ALL rows. Keep values exactly. Use "" for blanks. uncertain:true on unclear rows.\nReturn ONLY minified JSON:\n{"scheduleType":"Door Schedule","mapping":[{"pdfColumn":"NO.","importKey":"OPENING","confident":true}],"rows":[{"OPENING":"101"}]}', fn);
+}
+
+function extractHdw(b64, fn) {
+  return callClaude(b64, 'Extract the HARDWARE SCHEDULE from this PDF.\nHardware schedules list sets with line items for hinges, locksets, closers, etc.\nMap columns to: HDW_SET, ITEM_NO, QTY, MANUFACTURER, PRODUCT, DESCRIPTION, FINISH, NOTES\nHDW_SET=set number, ITEM_NO=line item, QTY=quantity, MANUFACTURER=mfr name, PRODUCT=catalog number, DESCRIPTION=item description, FINISH=finish code, NOTES=remarks\nRepeat HDW_SET on every row in that set.\nExtract ALL rows. Keep values exactly. Use "" for blanks. uncertain:true on unclear rows.\nReturn ONLY minified JSON:\n{"scheduleType":"Hardware Schedule","mapping":[{"pdfColumn":"SET","importKey":"HDW_SET","confident":true}],"rows":[{"HDW_SET":"1","ITEM_NO":"1","QTY":"3","MANUFACTURER":"Hager","PRODUCT":"780-112","DESCRIPTION":"Continuous Hinge","FINISH":"US26D","NOTES":"","uncertain":false}]}', fn);
+}
+
+/* ═══════════ MAPPING POPUP ═══════════ */
+function MappingPopup(props) {
+  var _s = useState(props.mapping.map(function(m){return Object.assign({},m);}));
+  var local = _s[0], setLocal = _s[1];
+  var _c1 = useState(""), cpdf = _c1[0], setCpdf = _c1[1];
+  var _c2 = useState(""), ckey = _c2[0], setCkey = _c2[1];
+
+  var allKeys = props.importKeys.slice();
+  local.forEach(function(m) { if(allKeys.indexOf(m.importKey)===-1) allKeys.push(m.importKey); });
+
+  function upK(i,v) { setLocal(function(p){return p.map(function(m,j){return j===i?Object.assign({},m,{importKey:v,confident:true}):m;});}); }
+  function del(i) { setLocal(function(p){return p.filter(function(_,j){return j!==i;});}); }
+  function addC() { if(cpdf&&ckey){setLocal(function(p){return p.concat([{pdfColumn:cpdf,importKey:ckey,confident:true}]);});setCpdf("");setCkey("");} }
+  function confirm() {
+    var kr = props.rawRows.map(function(row) {
+      var r = { uncertain:row.uncertain||false };
+      local.forEach(function(m) { r[m.importKey] = row[m.importKey] != null ? row[m.importKey] : (row[m.pdfColumn] != null ? row[m.pdfColumn] : ""); });
+      return r;
+    });
+    props.onConfirm(kr, new Set(local.map(function(m){return m.importKey;})));
+  }
+
+  var lc = local.filter(function(m){return !m.confident;}).length;
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:"#fff",border:"1px solid #c8e0c8",borderRadius:14,boxShadow:"0 8px 32px rgba(0,0,0,.1)",width:"100%",maxWidth:780,maxHeight:"90vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+        <div style={{padding:"20px 28px",borderBottom:"1px solid #c8e0c8",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16}}>
+          <div>
+            <div style={{fontSize:15,fontWeight:700,color:"#1e2e1e",marginBottom:4}}>{props.title||"Column Mapping"}</div>
+            <div style={{fontSize:11,color:"#5a9e5a"}}>{local.length} columns detected.{lc>0?<span style={{color:"#92400e"}}> {lc} flagged.</span>:null}</div>
+          </div>
+          <button style={btnS("ghost")} onClick={props.onBack}>← Back</button>
+        </div>
+        <div style={{overflowY:"auto",padding:"12px 28px 16px",flex:1}}>
+          {local.map(function(m,i){return (
+            <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 20px 1fr 70px 32px",gap:10,alignItems:"center",marginBottom:7,borderRadius:6,padding:"3px 0",background:!m.confident?"rgba(255,248,225,.2)":"transparent"}}>
+              <div style={{background:"#f0f7f0",border:"1px solid #c8e0c8",borderRadius:6,padding:"7px 10px",fontSize:11,color:"#1e5c1e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={m.pdfColumn}>{m.pdfColumn}</div>
+              <div style={{textAlign:"center",color:"#3a7a3a",fontSize:14}}>→</div>
+              <select value={m.importKey} onChange={function(e){upK(i,e.target.value);}} style={Object.assign({},S.input,{cursor:"pointer"})}>
+                {allKeys.map(function(k){return <option key={k} value={k}>{k}{props.keyLabels[k]?" — "+props.keyLabels[k]:""}</option>;})}
+              </select>
+              <div style={{fontSize:9,fontWeight:700,textTransform:"uppercase",textAlign:"center",color:m.confident?"#1a5c1a":"#b45309"}}>{m.confident?"✓ Sure":"⚠ Check"}</div>
+              <button onClick={function(){del(i);}} style={{background:"#fef3c7",border:"1px solid rgba(127,29,29,.25)",borderRadius:6,color:"#b45309",cursor:"pointer",fontSize:15,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+            </div>
+          );})}
+          <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid rgba(200,224,200,.3)"}}>
+            <div style={{fontSize:10,color:"#5a9e5a",marginBottom:8}}>Add a missing column:</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 20px 1fr auto",gap:10,alignItems:"center"}}>
+              <input style={S.input} placeholder="PDF column" value={cpdf} onChange={function(e){setCpdf(e.target.value);}} />
+              <div style={{textAlign:"center",color:"#6a9a6a"}}>→</div>
+              <input style={S.input} placeholder="Import key" value={ckey} onChange={function(e){setCkey(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")addC();}} />
+              <button style={btnS("ghost")} onClick={addC}>+ Add</button>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:"16px 28px",borderTop:"1px solid #c8e0c8",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:11,color:"#6a9a6a"}}>{local.length} cols · {props.rawRows.length} rows</div>
+          <button style={btnS("success")} onClick={confirm}>Confirm Mapping →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════ UPLOAD PANEL ═══════════ */
+function UploadPanel(props) {
+  var _d = useState(false), dragging = _d[0], setDragging = _d[1];
+  var fRef = useRef();
+  function hf(f) { if(!f||f.type!=="application/pdf") return; props.setFile(f); }
+  return (
+    <div style={S.card}>
+      <span style={S.label}>Upload {props.scheduleLabel} PDF</span>
+      <div style={dzStyle(dragging)}
+        onDragOver={function(e){e.preventDefault();setDragging(true);}}
+        onDragLeave={function(){setDragging(false);}}
+        onDrop={function(e){e.preventDefault();setDragging(false);hf(e.dataTransfer.files[0]);}}
+        onClick={function(){fRef.current.click();}}>
+        <div style={{fontSize:40,marginBottom:12}}>📄</div>
+        <div style={{fontSize:15,color:"#1e5c1e",marginBottom:6}}>{props.file?props.file.name:"Drop your "+props.scheduleLabel.toLowerCase()+" PDF here"}</div>
+        <div style={{fontSize:11,color:"#6a9a6a"}}>or click to browse</div>
+        {props.file?<div style={{marginTop:10,fontSize:11,color:"#2d7a2d"}}>✓ Ready to extract</div>:null}
+      </div>
+      <input ref={fRef} type="file" accept=".pdf" style={{display:"none"}} onChange={function(e){hf(e.target.files[0]);}}/>
+      <div style={{marginTop:18,display:"flex",gap:10,alignItems:"center"}}>
+        <button style={btnS("primary")} disabled={!props.file||props.extracting} onClick={props.onExtract}>
+          {props.extracting?"⏳ Extracting…":"🔍 Extract Schedule"}
+        </button>
+        {props.extracting?<span style={{color:"#5a9e5a",fontSize:11,fontStyle:"italic"}}>{props.progress}</span>:null}
+      </div>
+      {props.error?<div style={{background:"#fef3c7",border:"1px solid #92400e",borderRadius:8,padding:"10px 16px",marginTop:14,color:"#92400e",fontSize:12}}>⚠️ {props.error}</div>:null}
+      {props.rulesInfo?<div style={{marginTop:24}}>{props.rulesInfo}</div>:null}
+    </div>
+  );
+}
+
+/* ═══════════ REVIEW GRID ═══════════ */
+function ReviewGrid(props) {
+  var editRows=props.editRows, setEditRows=props.setEditRows;
+  var activeHeaders=props.activeHeaders, setActiveHeaders=props.setActiveHeaders;
+  var headerLabels=props.headerLabels, file=props.file;
+  var _u=useState(false), uOnly=_u[0], setUOnly=_u[1];
+  var _eh=useState(null), eH=_eh[0], setEH=_eh[1];
+
+  function upCell(ri,h,v){setEditRows(function(p){return p.map(function(r,i){return i===ri?Object.assign({},r,(_o={},_o[h]=v,_o.__uncertain=false,_o)):r;var _o;});});}
+  function addRow(){var o={__uncertain:false};activeHeaders.forEach(function(h){o[h]="";});setEditRows(function(p){return p.concat([o]);});}
+  function delRow(ri){setEditRows(function(p){return p.filter(function(_,i){return i!==ri;});});}
+  function addCol(){var n=prompt("Column name:");if(!n)return;setActiveHeaders(function(p){return p.concat([n]);});setEditRows(function(p){return p.map(function(r){var x=Object.assign({},r);x[n]="";return x;});});}
+  function renH(o,n){if(!n||n===o)return;setActiveHeaders(function(p){return p.map(function(h){return h===o?n:h;});});setEditRows(function(p){return p.map(function(r){var x=Object.assign({},r);x[n]=r[o];delete x[o];return x;});});setEH(null);}
+  function delCol(k){setActiveHeaders(function(p){return p.filter(function(h){return h!==k;});});setEditRows(function(p){return p.map(function(r){var x=Object.assign({},r);delete x[k];return x;});});}
+  function expCSV(){downloadBlob(toCSV(editRows,activeHeaders),(file?file.name.replace(".pdf",""):"schedule")+".csv","text/csv");}
+  async function expXL(){await doDownloadXLSX(editRows,activeHeaders,(file?file.name.replace(".pdf",""):"schedule")+".xlsx");}
+
+  var uCnt=editRows.filter(function(r){return r.__uncertain;}).length;
+  var dRows=uOnly?editRows.filter(function(r){return r.__uncertain;}):editRows;
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
+        <div>
+          <div style={{fontSize:16,fontWeight:700,color:"#1e2e1e"}}>{props.scheduleType||"Schedule"}</div>
+          <div style={{fontSize:11,color:"#6a9a6a"}}>{editRows.length} rows · {activeHeaders.length} cols{file?" · "+file.name:""}</div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:8,flexWrap:"wrap"}}>
+          {uCnt>0?<button style={btnS(uOnly?"amber":"ghost")} onClick={function(){setUOnly(function(p){return !p;});}}>⚠️ {uCnt} uncertain</button>:null}
+          {props.onEditMapping?<button style={btnS("ghost")} onClick={props.onEditMapping}>← Mapping</button>:null}
+          <button style={btnS("ghost")} onClick={props.onNewFile}>← New File</button>
+          <button style={btnS("primary")} onClick={expCSV}>⬇ CSV</button>
+          <button style={btnS("success")} onClick={expXL}>⬇ XLSX</button>
+        </div>
+      </div>
+      {props.truncated?<div style={{background:"#fef3c7",border:"1px solid #92400e",borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:11,color:"#92400e"}}>⚠️ <strong>Truncated</strong> — add missing rows with + Row.</div>:null}
+      {uCnt>0&&!uOnly?<div style={{background:"#fef3c7",border:"1px solid #92400e",borderRadius:8,padding:"10px 16px",marginBottom:16,fontSize:11,color:"#92400e"}}>⚠️ {uCnt} rows flagged.</div>:null}
+      <div style={S.card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <span style={S.label}>Review &amp; Edit</span>
+          <div style={{display:"flex",gap:8}}>
+            <button style={btnS("ghost")} onClick={addCol}>+ Column</button>
+            <button style={btnS("ghost")} onClick={addRow}>+ Row</button>
+          </div>
+        </div>
+        <div style={{overflowX:"auto",maxHeight:"65vh",overflowY:"auto",borderRadius:7,border:"1px solid #c8e0c8"}}>
+          <table style={{borderCollapse:"collapse",width:"100%",fontSize:11}}>
+            <thead>
+              <tr>
+                <th style={Object.assign({},S.th,{width:30,textAlign:"center"})}>#</th>
+                {activeHeaders.map(function(h){return (
+                  <th key={h} style={S.th}>
+                    {eH&&eH.key===h?(
+                      <input autoFocus style={Object.assign({},S.cellInput,{color:"#1e2e1e",fontSize:10,background:"#f5f7f5",border:"1px solid #2d7a2d",borderRadius:4,padding:"2px 6px"})}
+                        value={eH.value} onChange={function(e){setEH({key:h,value:e.target.value});}}
+                        onBlur={function(){renH(h,eH.value);}} onKeyDown={function(e){if(e.key==="Enter")renH(h,eH.value);if(e.key==="Escape")setEH(null);}}/>
+                    ):(
+                      <div style={{display:"flex",alignItems:"center",gap:5}}>
+                        <span style={{cursor:"text",flex:1}} onClick={function(){setEH({key:h,value:h});}}>{h}</span>
+                        <button onClick={function(){delCol(h);}} style={{background:"none",border:"none",color:"rgba(229,83,51,.5)",cursor:"pointer",fontSize:13,padding:"0 2px",lineHeight:1}}>×</button>
+                      </div>
+                    )}
+                    {headerLabels[h]?<div style={S.thSub}>{headerLabels[h]}</div>:null}
+                  </th>
+                );})}
+                <th style={Object.assign({},S.th,{width:36})}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {dRows.map(function(row,ri){
+                var ai=uOnly?editRows.indexOf(row):ri;
+                return (
+                  <tr key={ai} style={{background:ri%2?"#f5faf5":"transparent"}}>
+                    <td style={Object.assign({},tdS(row.__uncertain),{textAlign:"center",color:row.__uncertain?"#b45309":"#9ab89a",fontSize:9})}>{row.__uncertain?"⚠":ai+1}</td>
+                    {activeHeaders.map(function(h){return (
+                      <td key={h} style={tdS(row.__uncertain)}>
+                        <input style={Object.assign({},S.cellInput,{color:row.__uncertain?"#92400e":"#1e2e1e"})} value={row[h]||""} onChange={function(e){upCell(ai,h,e.target.value);}}/>
+                      </td>
+                    );})}
+                    <td style={tdS(row.__uncertain)}>
+                      <button onClick={function(){delRow(ai);}} style={{background:"none",border:"none",color:"#e55333",cursor:"pointer",fontSize:15,padding:"2px 6px"}}>×</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{marginTop:10,fontSize:10,color:"#6a9a6a"}}>💡 Click header to rename · × deletes column/row</div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════ DOOR TAB ═══════════ */
+function DoorTab() {
+  var _st=useState("upload"),stage=_st[0],setStage=_st[1];
+  var _fi=useState(null),file=_fi[0],setFile=_fi[1];
+  var _rr=useState(null),rawR=_rr[0],setRawR=_rr[1];
+  var _er=useState([]),eRows=_er[0],setERows=_er[1];
+  var _e=useState(""),err=_e[0],setErr=_e[1];
+  var _p=useState(""),prog=_p[0],setProg=_p[1];
+  var _ah=useState(DOOR_HDRS.slice()),aH=_ah[0],setAH=_ah[1];
+
+  async function doExtract(){
+    if(!file)return; setStage("extracting"); setErr(""); setProg("Reading…");
+    try{ var b=await fileToBase64(file); var r=await extractDoor(b,setProg); setRawR(r); setStage("mapping"); }
+    catch(e){ setErr(e.message); setStage("upload"); }
+    setProg("");
+  }
+  function onMap(kr,mk){
+    var fr=transformDoorRows(kr);
+    var h=DOOR_HDRS.filter(function(hh){return DOOR_OPT.indexOf(hh)===-1||mk.has(hh);});
+    setAH(h); setERows(fr); setStage("review");
+  }
+
+  var rules=(<div><span style={S.label}>Auto-transform rules</span><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:8}}>{[["QUANTITY","Always 1"],["OPENING_SIZE","3'-0\" x 7'-0\" → 3070"],["OPENING_TYPE","Width > 4'-0\" → AI else SG"]].map(function(p){return <div key={p[0]} style={{background:"#f0f7f0",borderRadius:7,padding:"9px 12px",border:"1px solid #c8e0c8"}}><div style={{fontSize:9,fontWeight:700,color:"#2d7a2d",letterSpacing:1,marginBottom:3}}>{p[0]}</div><div style={{fontSize:10,color:"#3a6a3a"}}>{p[1]}</div></div>;})}</div></div>);
+
+  if(stage==="upload"||stage==="extracting") return <UploadPanel file={file} setFile={setFile} onExtract={doExtract} extracting={stage==="extracting"} progress={prog} error={err} rulesInfo={rules} scheduleLabel="Door Schedule"/>;
+  if(stage==="mapping"&&rawR) return <MappingPopup mapping={rawR.mapping||[]} rawRows={rawR.rows||[]} importKeys={DOOR_IMP_KEYS} keyLabels={DOOR_KEY_LBL} onConfirm={onMap} onBack={function(){setStage("upload");}} title="Door Schedule — Column Mapping"/>;
+  if(stage==="review") return <ReviewGrid editRows={eRows} setEditRows={setERows} activeHeaders={aH} setActiveHeaders={setAH} headerLabels={DOOR_HDR_LBL} file={file} scheduleType={rawR?rawR.scheduleType:"Door Schedule"} truncated={rawR?rawR._truncated:false} onNewFile={function(){setStage("upload");setFile(null);setERows([]);}} onEditMapping={function(){setStage("mapping");}}/>;
+  return null;
+}
+
+/* ═══════════ HARDWARE TAB ═══════════ */
+function HdwTab() {
+  var _st=useState("upload"),stage=_st[0],setStage=_st[1];
+  var _fi=useState(null),file=_fi[0],setFile=_fi[1];
+  var _rr=useState(null),rawR=_rr[0],setRawR=_rr[1];
+  var _er=useState([]),eRows=_er[0],setERows=_er[1];
+  var _e=useState(""),err=_e[0],setErr=_e[1];
+  var _p=useState(""),prog=_p[0],setProg=_p[1];
+  var _ah=useState(HDW_HDRS.slice()),aH=_ah[0],setAH=_ah[1];
+
+  async function doExtract(){
+    if(!file)return; setStage("extracting"); setErr(""); setProg("Reading…");
+    try{ var b=await fileToBase64(file); var r=await extractHdw(b,setProg); setRawR(r); setStage("mapping"); }
+    catch(e){ setErr(e.message); setStage("upload"); }
+    setProg("");
+  }
+  function onMap(kr,mk){
+    var fr=kr.map(function(row){
+      var r={__uncertain:row.uncertain||false};
+      HDW_HDRS.forEach(function(h){r[h]=String(row[h]||"").trim();});
+      return r;
+    });
+    var h=HDW_HDRS.filter(function(hh){return mk.has(hh);});
+    setAH(h.length>0?h:HDW_HDRS.slice());
+    setERows(fr); setStage("review");
+  }
+
+  var rules=(<div><span style={S.label}>What gets extracted</span><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:8}}>{[["HDW_SET","Set identifier (1, 293R.1, etc.)"],["Line Items","Each hinge, lock, closer = 1 row"],["MANUFACTURER","Schlage, LCN, Hager, etc."],["FINISH","US26D, 689, 626, etc."]].map(function(p){return <div key={p[0]} style={{background:"#f0f7f0",borderRadius:7,padding:"9px 12px",border:"1px solid #c8e0c8"}}><div style={{fontSize:9,fontWeight:700,color:"#2d7a2d",letterSpacing:1,marginBottom:3}}>{p[0]}</div><div style={{fontSize:10,color:"#3a6a3a"}}>{p[1]}</div></div>;})}</div></div>);
+
+  if(stage==="upload"||stage==="extracting") return <UploadPanel file={file} setFile={setFile} onExtract={doExtract} extracting={stage==="extracting"} progress={prog} error={err} rulesInfo={rules} scheduleLabel="Hardware Schedule"/>;
+  if(stage==="mapping"&&rawR) return <MappingPopup mapping={rawR.mapping||[]} rawRows={rawR.rows||[]} importKeys={HDW_IMP_KEYS} keyLabels={HDW_HDR_LBL} onConfirm={onMap} onBack={function(){setStage("upload");}} title="Hardware Schedule — Column Mapping"/>;
+  if(stage==="review") return <ReviewGrid editRows={eRows} setEditRows={setERows} activeHeaders={aH} setActiveHeaders={setAH} headerLabels={HDW_HDR_LBL} file={file} scheduleType={rawR?rawR.scheduleType:"Hardware Schedule"} truncated={rawR?rawR._truncated:false} onNewFile={function(){setStage("upload");setFile(null);setERows([]);}} onEditMapping={function(){setStage("mapping");}}/>;
+  return null;
+}
+
+/* ═══════════ APP ═══════════ */
+function App() {
+  var _t=useState("door"),tab=_t[0],setTab=_t[1];
+  return (
+    <div style={S.app}>
+      <div style={S.header}>
+        <div style={{width:40,height:40,background:"#1a5c1a",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontWeight:700,fontSize:13,flexShrink:0}}>CHC</div>
+        <div style={{flex:1,minWidth:180}}>
+          <div style={{fontSize:17,fontWeight:700,color:"#fff",letterSpacing:2,textTransform:"uppercase"}}>CHC Schedule Importer</div>
+          <div style={{fontSize:11,color:"#c8f0c8",letterSpacing:.5}}>PDF Extraction &amp; Import Tool</div>
+        </div>
+      </div>
+      <div style={{background:"linear-gradient(135deg,#1e5c1e,#1a4a1a)",padding:"0 32px",display:"flex",gap:4}}>
+        <button style={tabS(tab==="door")} onClick={function(){setTab("door");}}>🚪 Door Schedule</button>
+        <button style={tabS(tab==="hardware")} onClick={function(){setTab("hardware");}}>🔩 Hardware Schedule</button>
+      </div>
+      <div style={S.main}>
+        {tab==="door"?<DoorTab/>:null}
+        {tab==="hardware"?<HdwTab/>:null}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>
